@@ -1,5 +1,5 @@
 # Copyright (c) 2015 Ultimaker B.V.
-# Uranium is released under the terms of the AGPLv3 or higher.
+# Uranium is released under the terms of the LGPLv3 or higher.
 
 from UM.Mesh.MeshWriter import MeshWriter
 from UM.Math.Vector import Vector
@@ -87,7 +87,7 @@ class ThreeMFWriter(MeshWriter):
         if stack is not None:
             changed_setting_keys = set(stack.getTop().getAllKeys())
 
-            # Ensure that we save the extruder used for this object.
+            # Ensure that we save the extruder used for this object in a multi-extrusion setup
             if stack.getProperty("machine_extruder_count", "value") > 1:
                 changed_setting_keys.add("extruder_nr")
 

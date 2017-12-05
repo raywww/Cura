@@ -1,5 +1,5 @@
-# Copyright (c) 2016 Ultimaker B.V.
-# Cura is released under the terms of the AGPLv3 or higher.
+#Copyright (c) 2017 Ultimaker B.V.
+#Cura is released under the terms of the LGPLv3 or higher.
 
 import gc
 
@@ -24,6 +24,7 @@ from cura import LayerPolygon
 
 import numpy
 from time import time
+from cura.Settings.ExtrudersModel import ExtrudersModel
 catalog = i18nCatalog("cura")
 
 
@@ -31,6 +32,9 @@ catalog = i18nCatalog("cura")
 #
 #   \param color_code html color code, i.e. "#FF0000" -> red
 def colorCodeToRGBA(color_code):
+    if color_code is None:
+        Logger.log("w", "Unable to convert color code, returning default")
+        return [0, 0, 0, 1]
     return [
         int(color_code[1:3], 16) / 255,
         int(color_code[3:5], 16) / 255,
@@ -43,7 +47,7 @@ class ProcessSlicedLayersJob(Job):
         super().__init__()
         self._layers = layers
         self._scene = Application.getInstance().getController().getScene()
-        self._progress = None
+        self._progress_message = Message(catalog.i18nc("@info:status", "Processing Layers"), 0, False, -1)
         self._abort_requested = False
 
     ##  Aborts the processing of layers.
@@ -57,13 +61,14 @@ class ProcessSlicedLayersJob(Job):
 
     def run(self):
         start_time = time()
-        if Application.getInstance().getController().getActiveView().getPluginId() == "LayerView":
-            self._progress = Message(catalog.i18nc("@info:status", "Processing Layers"), 0, False, -1)
-            self._progress.show()
+        view = Application.getInstance().getController().getActiveView()
+        if view.getPluginId() == "SimulationView":
+            view.resetLayerData()
+            self._progress_message.show()
             Job.yieldThread()
             if self._abort_requested:
-                if self._progress:
-                    self._progress.hide()
+                if self._progress_message:
+                    self._progress_message.hide()
                 return
 
         Application.getInstance().getController().activeViewChanged.connect(self._onActiveViewChanged)
@@ -76,8 +81,8 @@ class ProcessSlicedLayersJob(Job):
                 node.getParent().removeChild(node)
                 break
             if self._abort_requested:
-                if self._progress:
-                    self._progress.hide()
+                if self._progress_message:
+                    self._progress_message.hide()
                 return
 
         # Force garbage collection.
@@ -92,20 +97,27 @@ class ProcessSlicedLayersJob(Job):
 
         # Find the minimum layer number
         # When using a raft, the raft layers are sent as layers < 0. Instead of allowing layers < 0, we
-        # instead simply offset all other layers so the lowest layer is always 0.
+        # instead simply offset all other layers so the lowest layer is always 0. It could happens that
+        # the first raft layer has value -8 but there are just 4 raft (negative) layers.
         min_layer_number = 0
+        negative_layers = 0
         for layer in self._layers:
             if layer.id < min_layer_number:
                 min_layer_number = layer.id
+            if layer.id < 0:
+                negative_layers += 1
 
         current_layer = 0
 
         for layer in self._layers:
-            abs_layer_number = layer.id + abs(min_layer_number)
+            # Negative layers are offset by the minimum layer number, but the positive layers are just
+            # offset by the number of negative layers so there is no layer gap between raft and model
+            abs_layer_number = layer.id + abs(min_layer_number) if layer.id < 0 else layer.id + negative_layers
 
             layer_data.addLayer(abs_layer_number)
             this_layer = layer_data.getLayer(abs_layer_number)
             layer_data.setLayerHeight(abs_layer_number, layer.height)
+            layer_data.setLayerThickness(abs_layer_number, layer.thickness)
 
             for p in range(layer.repeatedMessageCount("path_segment")):
                 polygon = layer.getRepeatedMessage("path_segment", p)
@@ -124,10 +136,11 @@ class ProcessSlicedLayersJob(Job):
                 line_widths = numpy.fromstring(polygon.line_width, dtype="f4")  # Convert bytearray to numpy array
                 line_widths = line_widths.reshape((-1,1))  # We get a linear list of pairs that make up the points, so make numpy interpret them correctly.
 
-                # In the future, line_thicknesses should be given by CuraEngine as well.
-                # Currently the infill layer thickness also translates to line width
-                line_thicknesses = numpy.zeros(line_widths.shape, dtype="f4")
-                line_thicknesses[:] = layer.thickness / 1000  # from micrometer to millimeter
+                line_thicknesses = numpy.fromstring(polygon.line_thickness, dtype="f4")  # Convert bytearray to numpy array
+                line_thicknesses = line_thicknesses.reshape((-1,1))  # We get a linear list of pairs that make up the points, so make numpy interpret them correctly.
+
+                line_feedrates = numpy.fromstring(polygon.line_feedrate, dtype="f4")  # Convert bytearray to numpy array
+                line_feedrates = line_feedrates.reshape((-1,1))  # We get a linear list of pairs that make up the points, so make numpy interpret them correctly.
 
                 # Create a new 3D-array, copy the 2D points over and insert the right height.
                 # This uses manual array creation + copy rather than numpy.insert since this is
@@ -142,7 +155,7 @@ class ProcessSlicedLayersJob(Job):
                     new_points[:, 1] = points[:, 2]
                     new_points[:, 2] = -points[:, 1]
 
-                this_poly = LayerPolygon.LayerPolygon(extruder, line_types, new_points, line_widths, line_thicknesses)
+                this_poly = LayerPolygon.LayerPolygon(extruder, line_types, new_points, line_widths, line_thicknesses, line_feedrates)
                 this_poly.buildCache()
 
                 this_layer.polygons.append(this_poly)
@@ -155,11 +168,11 @@ class ProcessSlicedLayersJob(Job):
             # This needs some work in LayerData so we can add the new layers instead of recreating the entire mesh.
 
             if self._abort_requested:
-                if self._progress:
-                    self._progress.hide()
+                if self._progress_message:
+                    self._progress_message.hide()
                 return
-            if self._progress:
-                self._progress.setProgress(progress)
+            if self._progress_message:
+                self._progress_message.setProgress(progress)
 
         # We are done processing all the layers we got from the engine, now create a mesh out of the data
 
@@ -170,19 +183,18 @@ class ProcessSlicedLayersJob(Job):
         if extruders:
             material_color_map = numpy.zeros((len(extruders), 4), dtype=numpy.float32)
             for extruder in extruders:
-                material = extruder.findContainer({"type": "material"})
                 position = int(extruder.getMetaDataEntry("position", default="0"))  # Get the position
-                color_code = material.getMetaDataEntry("color_code")
+                try:
+                    default_color = ExtrudersModel.defaultColors[position]
+                except IndexError:
+                    default_color = "#e0e000"
+                color_code = extruder.material.getMetaDataEntry("color_code", default=default_color)
                 color = colorCodeToRGBA(color_code)
                 material_color_map[position, :] = color
         else:
             # Single extruder via global stack.
             material_color_map = numpy.zeros((1, 4), dtype=numpy.float32)
-            material = global_container_stack.findContainer({"type": "material"})
-            color_code = "#e0e000"
-            if material:
-                if material.getMetaDataEntry("color_code") is not None:
-                    color_code = material.getMetaDataEntry("color_code")
+            color_code = global_container_stack.material.getMetaDataEntry("color_code", default="#e0e000")
             color = colorCodeToRGBA(color_code)
             material_color_map[0, :] = color
 
@@ -194,8 +206,8 @@ class ProcessSlicedLayersJob(Job):
         layer_mesh = layer_data.build(material_color_map, line_type_brightness)
 
         if self._abort_requested:
-            if self._progress:
-                self._progress.hide()
+            if self._progress_message:
+                self._progress_message.hide()
             return
 
         # Add LayerDataDecorator to scene node to indicate that the node has layer data
@@ -213,15 +225,11 @@ class ProcessSlicedLayersJob(Job):
         if not settings.getProperty("machine_center_is_zero", "value"):
             new_node.setPosition(Vector(-settings.getProperty("machine_width", "value") / 2, 0.0, settings.getProperty("machine_depth", "value") / 2))
 
-        if self._progress:
-            self._progress.setProgress(100)
+        if self._progress_message:
+            self._progress_message.setProgress(100)
 
-        view = Application.getInstance().getController().getActiveView()
-        if view.getPluginId() == "LayerView":
-            view.resetLayerData()
-
-        if self._progress:
-            self._progress.hide()
+        if self._progress_message:
+            self._progress_message.hide()
 
         # Clear the unparsed layers. This saves us a bunch of memory if the Job does not get destroyed.
         self._layers = None
@@ -230,11 +238,12 @@ class ProcessSlicedLayersJob(Job):
 
     def _onActiveViewChanged(self):
         if self.isRunning():
-            if Application.getInstance().getController().getActiveView().getPluginId() == "LayerView":
-                if not self._progress:
-                    self._progress = Message(catalog.i18nc("@info:status", "Processing Layers"), 0, False, 0)
-                if self._progress.getProgress() != 100:
-                    self._progress.show()
+            if Application.getInstance().getController().getActiveView().getPluginId() == "SimulationView":
+                if not self._progress_message:
+                    self._progress_message = Message(catalog.i18nc("@info:status", "Processing Layers"), 0, False, 0, catalog.i18nc("@info:title", "Information"))
+                if self._progress_message.getProgress() != 100:
+                    self._progress_message.show()
             else:
-                if self._progress:
-                    self._progress.hide()
+                if self._progress_message:
+                    self._progress_message.hide()
+

@@ -1,5 +1,5 @@
 // Copyright (c) 2016 Ultimaker B.V.
-// Uranium is released under the terms of the AGPLv3 or higher.
+// Uranium is released under the terms of the LGPLv3 or higher.
 
 import QtQuick 2.1
 import QtQuick.Controls 1.1
@@ -11,6 +11,7 @@ import Cura 1.0 as Cura
 SettingItem
 {
     id: base
+    property var focusItem: control
 
     contents: ComboBox
     {
@@ -25,6 +26,23 @@ SettingItem
         {
             forceActiveFocus();
             propertyProvider.setPropertyValue("value", model.getItem(index).index);
+        }
+
+        onActiveFocusChanged:
+        {
+            if(activeFocus)
+            {
+                base.focusReceived();
+            }
+        }
+
+        Keys.onTabPressed:
+        {
+            base.setActiveFocusToNextSetting(true)
+        }
+        Keys.onBacktabPressed:
+        {
+            base.setActiveFocusToNextSetting(false)
         }
 
         currentIndex: propertyProvider.properties.value
@@ -53,7 +71,7 @@ SettingItem
             {
                 color:
                 {
-                    if (!enabled)
+                    if(!enabled)
                     {
                         return UM.Theme.getColor("setting_control_disabled");
                     }
@@ -61,58 +79,54 @@ SettingItem
                     {
                         return UM.Theme.getColor("setting_control_highlight");
                     }
-                    else
-                    {
-                        return UM.Theme.getColor("setting_control");
-                    }
+                    return UM.Theme.getColor("setting_control");
                 }
                 border.width: UM.Theme.getSize("default_lining").width
                 border.color:
                 {
                     if(!enabled)
                     {
-                        return UM.Theme.getColor("setting_control_disabled_border");
+                        return UM.Theme.getColor("setting_control_disabled_border")
                     }
-                    if(control.hovered || base.activeFocus)
+                    if(control.hovered || control.activeFocus)
                     {
-                        UM.Theme.getColor("setting_control_border_highlight")
+                        return UM.Theme.getColor("setting_control_border_highlight")
                     }
-
                     return UM.Theme.getColor("setting_control_border")
                 }
             }
             label: Item
             {
+                Label
+                {
+                    id: extruderText
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    text: control.currentText
+                    font: UM.Theme.getFont("default")
+                    color: enabled ? UM.Theme.getColor("setting_control_text") : UM.Theme.getColor("setting_control_disabled_text")
+
+                    elide: Text.ElideLeft
+                    verticalAlignment: Text.AlignVCenter
+                }
                 Rectangle
                 {
                     id: swatch
                     height: UM.Theme.getSize("setting_control").height / 2
                     width: height
 
-                    anchors.verticalCenter: parent.verticalCenter
-
-                    border.width: UM.Theme.getSize("default_lining").width
-                    border.color: enabled ? UM.Theme.getColor("setting_control_border") : UM.Theme.getColor("setting_control_disabled_border")
-
-                    color: control.color
-                }
-                Label
-                {
                     anchors
                     {
-                        left: swatch.right;
-                        right: arrow.left;
+                        right: arrow.left
                         verticalCenter: parent.verticalCenter
-                        margins: UM.Theme.getSize("default_lining").width
+                        margins: UM.Theme.getSize("default_margin").width / 4
                     }
-                    width: parent.width - swatch.width;
 
-                    text: control.currentText
-                    font: UM.Theme.getFont("default")
-                    color: enabled ? UM.Theme.getColor("setting_control_text") : UM.Theme.getColor("setting_control_disabled_text")
+                    border.width: UM.Theme.getSize("default_lining").width * 2
+                    border.color: enabled ? UM.Theme.getColor("setting_control_border") : UM.Theme.getColor("setting_control_disabled_border")
+                    radius: width / 2
 
-                    elide: Text.ElideRight
-                    verticalAlignment: Text.AlignVCenter
+                    color: control.color
                 }
                 UM.RecolorImage
                 {
@@ -123,8 +137,8 @@ SettingItem
                     source: UM.Theme.getIcon("arrow_bottom")
                     width: UM.Theme.getSize("standard_arrow").width
                     height: UM.Theme.getSize("standard_arrow").height
-                    sourceSize.width: width + 5
-                    sourceSize.height: width + 5
+                    sourceSize.width: width + 5 * screenScaleFactor
+                    sourceSize.height: width + 5 * screenScaleFactor
 
                     color: UM.Theme.getColor("setting_control_text")
                 }

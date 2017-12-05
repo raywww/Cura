@@ -1,5 +1,5 @@
 # Copyright (c) 2016 Ultimaker B.V.
-# Cura is released under the terms of the AGPLv3 or higher.
+# Cura is released under the terms of the LGPLv3 or higher.
 
 from UM.Application import Application
 from UM.Math.Polygon import Polygon
@@ -54,6 +54,11 @@ class ConvexHullDecorator(SceneNodeDecorator):
     ##  Get the unmodified 2D projected convex hull of the node
     def getConvexHull(self):
         if self._node is None:
+            return None
+
+        if getattr(self._node, "_non_printing_mesh", False):
+            # infill_mesh, cutting_mesh and anti_overhang_mesh do not need a convex hull
+            # node._non_printing_mesh is set in SettingOverrideDecorator
             return None
 
         hull = self._compute2DConvexHull()
@@ -257,12 +262,16 @@ class ConvexHullDecorator(SceneNodeDecorator):
     #   \return New Polygon instance that is offset with everything that
     #   influences the collision area.
     def _offsetHull(self, convex_hull):
-        horizontal_expansion = self._getSettingProperty("xy_offset", "value")
+        horizontal_expansion = max(
+            self._getSettingProperty("xy_offset", "value"),
+            self._getSettingProperty("xy_offset_layer_0", "value")
+        )
+
         mold_width = 0
         if self._getSettingProperty("mold_enabled", "value"):
             mold_width = self._getSettingProperty("mold_width", "value")
         hull_offset = horizontal_expansion + mold_width
-        if hull_offset != 0:
+        if hull_offset > 0: #TODO: Implement Minkowski subtraction for if the offset < 0.
             expansion_polygon = Polygon(numpy.array([
                 [-hull_offset, -hull_offset],
                 [-hull_offset, hull_offset],
@@ -298,26 +307,23 @@ class ConvexHullDecorator(SceneNodeDecorator):
             self._onChanged()
 
     ##   Private convenience function to get a setting from the correct extruder (as defined by limit_to_extruder property).
-    def _getSettingProperty(self, setting_key, property="value"):
+    def _getSettingProperty(self, setting_key, prop = "value"):
         per_mesh_stack = self._node.callDecoration("getStack")
         if per_mesh_stack:
-            return per_mesh_stack.getProperty(setting_key, property)
-
-        multi_extrusion = self._global_stack.getProperty("machine_extruder_count", "value") > 1
-        if not multi_extrusion:
-            return self._global_stack.getProperty(setting_key, property)
+            return per_mesh_stack.getProperty(setting_key, prop)
 
         extruder_index = self._global_stack.getProperty(setting_key, "limit_to_extruder")
-        if extruder_index == "-1": #No limit_to_extruder.
+        if extruder_index == "-1":
+            # No limit_to_extruder
             extruder_stack_id = self._node.callDecoration("getActiveExtruder")
-            if not extruder_stack_id: #Decoration doesn't exist.
+            if not extruder_stack_id:
+                # Decoration doesn't exist
                 extruder_stack_id = ExtruderManager.getInstance().extruderIds["0"]
             extruder_stack = ContainerRegistry.getInstance().findContainerStacks(id = extruder_stack_id)[0]
-            return extruder_stack.getProperty(setting_key, property)
-        else: #Limit_to_extruder is set. Use that one.
-            extruder_stack_id = ExtruderManager.getInstance().extruderIds[str(extruder_index)]
-            stack = ContainerRegistry.getInstance().findContainerStacks(id = extruder_stack_id)[0]
-            return stack.getProperty(setting_key, property)
+            return extruder_stack.getProperty(setting_key, prop)
+        else:
+            # Limit_to_extruder is set. The global stack handles this then
+            return self._global_stack.getProperty(setting_key, prop)
 
     ## Returns true if node is a descendant or the same as the root node.
     def __isDescendant(self, root, node):
@@ -334,4 +340,4 @@ class ConvexHullDecorator(SceneNodeDecorator):
     ##  Settings that change the convex hull.
     #
     #   If these settings change, the convex hull should be recalculated.
-    _influencing_settings = {"xy_offset", "mold_enabled", "mold_width"}
+    _influencing_settings = {"xy_offset", "xy_offset_layer_0", "mold_enabled", "mold_width"}

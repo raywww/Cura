@@ -1,5 +1,5 @@
-# Copyright (c) 2015 Ultimaker B.V.
-# Cura is released under the terms of the AGPLv3 or higher.
+# Copyright (c) 2017 Ultimaker B.V.
+# Cura is released under the terms of the LGPLv3 or higher.
 
 import numpy
 from string import Formatter
@@ -26,6 +26,7 @@ class StartJobResult(IntEnum):
     NothingToSlice = 4
     MaterialIncompatible = 5
     BuildPlateError = 6
+    ObjectSettingError = 7 #When an error occurs in per-object settings.
 
 
 ##  Formatter class that handles token expansion in start/end gcod
@@ -97,7 +98,7 @@ class StartSliceJob(Job):
                 continue
 
             if self._checkStackForErrors(node.callDecoration("getStack")):
-                self.setResult(StartJobResult.SettingError)
+                self.setResult(StartJobResult.ObjectSettingError)
                 return
 
         with self._scene.getSceneLock():
@@ -132,7 +133,7 @@ class StartSliceJob(Job):
                 temp_list = []
                 for node in DepthFirstIterator(self._scene.getRoot()):
                     if type(node) is SceneNode and node.getMeshData() and node.getMeshData().getVertices() is not None:
-                        if not getattr(node, "_outside_buildarea", False):
+                        if not getattr(node, "_outside_buildarea", False) or getattr(node, "_non_printing_mesh", False):
                             temp_list.append(node)
                     Job.yieldThread()
 
@@ -149,6 +150,7 @@ class StartSliceJob(Job):
             self._buildGlobalSettingsMessage(stack)
             self._buildGlobalInheritsStackMessage(stack)
 
+            # Build messages for extruder stacks
             for extruder_stack in ExtruderManager.getInstance().getMachineExtruders(stack.getId()):
                 self._buildExtruderMessage(extruder_stack)
 
@@ -194,33 +196,61 @@ class StartSliceJob(Job):
     def isCancelled(self):
         return self._is_cancelled
 
-    def _expandGcodeTokens(self, key, value, settings):
+    ##  Creates a dictionary of tokens to replace in g-code pieces.
+    #
+    #   This indicates what should be replaced in the start and end g-codes.
+    #   \param stack The stack to get the settings from to replace the tokens
+    #   with.
+    #   \return A dictionary of replacement tokens to the values they should be
+    #   replaced with.
+    def _buildReplacementTokens(self, stack) -> dict:
+        result = {}
+        for key in stack.getAllKeys():
+            result[key] = stack.getProperty(key, "value")
+            Job.yieldThread()
+
+        result["print_bed_temperature"] = result["material_bed_temperature"] #Renamed settings.
+        result["print_temperature"] = result["material_print_temperature"]
+        result["time"] = time.strftime("%H:%M:%S") #Some extra settings.
+        result["date"] = time.strftime("%d-%m-%Y")
+        result["day"] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][int(time.strftime("%w"))]
+
+        return result
+
+    ##  Replace setting tokens in a piece of g-code.
+    #   \param value A piece of g-code to replace tokens in.
+    #   \param settings A dictionary of tokens to replace and their respective
+    #   replacement strings.
+    def _expandGcodeTokens(self, value: str, settings: dict):
         try:
             # any setting can be used as a token
             fmt = GcodeStartEndFormatter()
-            return str(fmt.format(value, **settings)).encode("utf-8")
+            return str(fmt.format(value, **settings))
         except:
             Logger.logException("w", "Unable to do token replacement on start/end gcode")
-            return str(value).encode("utf-8")
+            return str(value)
 
     ##  Create extruder message from stack
     def _buildExtruderMessage(self, stack):
         message = self._slice_message.addRepeatedMessage("extruders")
         message.id = int(stack.getMetaDataEntry("position"))
 
-        material_instance_container = stack.findContainer({"type": "material"})
+        settings = self._buildReplacementTokens(stack)
 
-        for key in stack.getAllKeys():
+        #Also send the material GUID. This is a setting in fdmprinter, but we have no interface for it.
+        settings["material_guid"] = stack.material.getMetaDataEntry("GUID", "")
+
+        #Replace the setting tokens in start and end g-code.
+        settings["machine_extruder_start_code"] = self._expandGcodeTokens(settings["machine_extruder_start_code"], settings)
+        settings["machine_extruder_end_code"] = self._expandGcodeTokens(settings["machine_extruder_end_code"], settings)
+
+        for key, value in settings.items():
             # Do not send settings that are not settable_per_extruder.
-            if stack.getProperty(key, "settable_per_extruder") == False:
+            if not stack.getProperty(key, "settable_per_extruder"):
                 continue
             setting = message.getMessage("settings").addRepeatedMessage("settings")
             setting.name = key
-            if key == "material_guid" and material_instance_container:
-                # Also send the material GUID. This is a setting in fdmprinter, but we have no interface for it.
-                setting.value = str(material_instance_container.getMetaDataEntry("GUID", "")).encode("utf-8")
-            else:
-                setting.value = str(stack.getProperty(key, "value")).encode("utf-8")
+            setting.value = str(value).encode("utf-8")
             Job.yieldThread()
 
     ##  Sends all global settings to the engine.
@@ -228,11 +258,7 @@ class StartSliceJob(Job):
     #   The settings are taken from the global stack. This does not include any
     #   per-extruder settings or per-object settings.
     def _buildGlobalSettingsMessage(self, stack):
-        keys = stack.getAllKeys()
-        settings = {}
-        for key in keys:
-            settings[key] = stack.getProperty(key, "value")
-            Job.yieldThread()
+        settings = self._buildReplacementTokens(stack)
 
         start_gcode = settings["machine_start_gcode"]
         #Pre-compute material material_bed_temp_prepend and material_print_temp_prepend
@@ -241,20 +267,14 @@ class StartSliceJob(Job):
         print_temperature_settings = {"material_print_temperature", "material_print_temperature_layer_0", "default_material_print_temperature", "material_initial_print_temperature", "material_final_print_temperature", "material_standby_temperature"}
         settings["material_print_temp_prepend"] = all(("{" + setting + "}" not in start_gcode for setting in print_temperature_settings))
 
-        settings["print_bed_temperature"] = settings["material_bed_temperature"]
-        settings["print_temperature"] = settings["material_print_temperature"]
-
-        settings["time"] = time.strftime('%H:%M:%S')
-        settings["date"] = time.strftime('%d-%m-%Y')
-        settings["day"] = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][int(time.strftime('%w'))]
+        #Replace the setting tokens in start and end g-code.
+        settings["machine_start_gcode"] = self._expandGcodeTokens(settings["machine_start_gcode"], settings)
+        settings["machine_end_gcode"] = self._expandGcodeTokens(settings["machine_end_gcode"], settings)
 
         for key, value in settings.items(): #Add all submessages for each individual setting.
             setting_message = self._slice_message.getMessage("global_settings").addRepeatedMessage("settings")
             setting_message.name = key
-            if key == "machine_start_gcode" or key == "machine_end_gcode" or key == "machine_extruder_start_code" or key == "machine_extruder_end_code": #If it's a g-code message, use special formatting.
-                setting_message.value = self._expandGcodeTokens(key, value, settings)
-            else:
-                setting_message.value = str(value).encode("utf-8")
+            setting_message.value = str(value).encode("utf-8")
             Job.yieldThread()
 
     ##  Sends for some settings which extruder they should fallback to if not
@@ -279,33 +299,49 @@ class StartSliceJob(Job):
     #   \param message object_lists message to put the per object settings in
     def _handlePerObjectSettings(self, node, message):
         stack = node.callDecoration("getStack")
+
         # Check if the node has a stack attached to it and the stack has any settings in the top container.
-        if stack:
-            # Check all settings for relations, so we can also calculate the correct values for dependant settings.
-            changed_setting_keys = set(stack.getTop().getAllKeys())
-            for key in stack.getTop().getAllKeys():
-                instance = stack.getTop().getInstance(key)
-                self._addRelations(changed_setting_keys, instance.definition.relations)
-                Job.yieldThread()
+        if not stack:
+            return
 
-            # Ensure that the engine is aware what the build extruder is
-            if stack.getProperty("machine_extruder_count", "value") > 1:
-                changed_setting_keys.add("extruder_nr")
+        # Check all settings for relations, so we can also calculate the correct values for dependent settings.
+        top_of_stack = stack.getTop()  # Cache for efficiency.
+        changed_setting_keys = set(top_of_stack.getAllKeys())
 
-            # Get values for all changed settings
-            for key in changed_setting_keys:
-                setting = message.addRepeatedMessage("settings")
-                setting.name = key
-                setting.value = str(stack.getProperty(key, "value")).encode("utf-8")
-                Job.yieldThread()
+        # Add all relations to changed settings as well.
+        for key in top_of_stack.getAllKeys():
+            instance = top_of_stack.getInstance(key)
+            self._addRelations(changed_setting_keys, instance.definition.relations)
+            Job.yieldThread()
 
-    ##  Recursive function to put all settings that require eachother for value changes in a list
+        # Ensure that the engine is aware what the build extruder is.
+        if stack.getProperty("machine_extruder_count", "value") > 1:
+            changed_setting_keys.add("extruder_nr")
+
+        # Get values for all changed settings
+        for key in changed_setting_keys:
+            setting = message.addRepeatedMessage("settings")
+            setting.name = key
+            extruder = int(round(float(stack.getProperty(key, "limit_to_extruder"))))
+
+            # Check if limited to a specific extruder, but not overridden by per-object settings.
+            if extruder >= 0 and key not in changed_setting_keys:
+                limited_stack = ExtruderManager.getInstance().getActiveExtruderStacks()[extruder]
+            else:
+                limited_stack = stack
+
+            setting.value = str(limited_stack.getProperty(key, "value")).encode("utf-8")
+
+            Job.yieldThread()
+
+    ##  Recursive function to put all settings that require each other for value changes in a list
     #   \param relations_set \type{set} Set of keys (strings) of settings that are influenced
     #   \param relations list of relation objects that need to be checked.
     def _addRelations(self, relations_set, relations):
-        for relation in filter(lambda r: r.role == "value", relations):
+        for relation in filter(lambda r: r.role == "value" or r.role == "limit_to_extruder", relations):
             if relation.type == RelationType.RequiresTarget:
                 continue
 
             relations_set.add(relation.target.key)
             self._addRelations(relations_set, relation.target.relations)
+

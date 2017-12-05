@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
 # Copyright (c) 2015 Ultimaker B.V.
-# Cura is released under the terms of the AGPLv3 or higher.
+# Cura is released under the terms of the LGPLv3 or higher.
 import os
 import sys
 import platform
+import faulthandler
 
 from UM.Platform import Platform
 
@@ -40,8 +41,9 @@ if "PYTHONPATH" in os.environ.keys():                       # If PYTHONPATH is u
         sys.path.insert(1, PATH_real)                       # Insert it at 1 after os.curdir, which is 0.
 
 def exceptHook(hook_type, value, traceback):
-    import cura.CrashHandler
-    cura.CrashHandler.show(hook_type, value, traceback)
+    from cura.CrashHandler import CrashHandler
+    _crash_handler = CrashHandler(hook_type, value, traceback)
+    _crash_handler.show()
 
 sys.excepthook = exceptHook
 
@@ -53,11 +55,22 @@ import Arcus #@UnusedImport
 import cura.CuraApplication
 import cura.Settings.CuraContainerRegistry
 
-if Platform.isWindows() and hasattr(sys, "frozen"):
-    dirpath = os.path.expanduser("~/AppData/Local/cura/")
+def get_cura_dir_path():
+    if Platform.isWindows():
+        return os.path.expanduser("~/AppData/Local/cura/")
+    elif Platform.isLinux():
+        return os.path.expanduser("~/.local/share/cura")
+    elif Platform.isOSX():
+        return os.path.expanduser("~/Library/Logs/cura")
+
+
+if hasattr(sys, "frozen"):
+    dirpath = get_cura_dir_path()
     os.makedirs(dirpath, exist_ok = True)
     sys.stdout = open(os.path.join(dirpath, "stdout.log"), "w")
     sys.stderr = open(os.path.join(dirpath, "stderr.log"), "w")
+
+faulthandler.enable()
 
 # Force an instance of CuraContainerRegistry to be created and reused later.
 cura.Settings.CuraContainerRegistry.CuraContainerRegistry.getInstance()

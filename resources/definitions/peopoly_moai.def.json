@@ -7,7 +7,6 @@
         "visible": true,
         "author": "fieldOfView",
         "manufacturer": "Peopoly",
-        "category": "Other",
         "file_formats": "text/x-gcode",
         "has_machine_quality": true,
         "has_materials": false
@@ -113,6 +112,12 @@
         },
         "speed_slowdown_layers": {
             "value": "2"
+        },
+        "infill_overlap": {
+            "value": "15"
+        },
+        "adhesion_type": {
+            "value": "\"none\""
         },
 
         "acceleration_enabled": {

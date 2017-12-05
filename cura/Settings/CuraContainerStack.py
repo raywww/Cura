@@ -1,11 +1,11 @@
 # Copyright (c) 2017 Ultimaker B.V.
-# Cura is released under the terms of the AGPLv3 or higher.
+# Cura is released under the terms of the LGPLv3 or higher.
 
 import os.path
 
 from typing import Any, Optional
 
-from PyQt5.QtCore import pyqtProperty, pyqtSignal
+from PyQt5.QtCore import pyqtProperty, pyqtSignal, QObject
 from UM.FlameProfiler import pyqtSlot
 
 from UM.Decorators import override
@@ -41,11 +41,25 @@ class CuraContainerStack(ContainerStack):
     def __init__(self, container_id: str, *args, **kwargs):
         super().__init__(container_id, *args, **kwargs)
 
-        self._empty_instance_container = ContainerRegistry.getInstance().getEmptyInstanceContainer()
+        self._container_registry = ContainerRegistry.getInstance()
+
+        self._empty_instance_container = self._container_registry.getEmptyInstanceContainer()
+
+        self._empty_quality_changes = self._container_registry.findInstanceContainers(id = "empty_quality_changes")[0]
+        self._empty_quality = self._container_registry.findInstanceContainers(id = "empty_quality")[0]
+        self._empty_material = self._container_registry.findInstanceContainers(id = "empty_material")[0]
+        self._empty_variant = self._container_registry.findInstanceContainers(id = "empty_variant")[0]
 
         self._containers = [self._empty_instance_container for i in range(len(_ContainerIndexes.IndexTypeMap))]
+        self._containers[_ContainerIndexes.QualityChanges] = self._empty_quality_changes
+        self._containers[_ContainerIndexes.Quality] = self._empty_quality
+        self._containers[_ContainerIndexes.Material] = self._empty_material
+        self._containers[_ContainerIndexes.Variant] = self._empty_variant
 
         self.containersChanged.connect(self._onContainersChanged)
+
+        import cura.CuraApplication #Here to prevent circular imports.
+        self.addMetaDataEntry("setting_version", cura.CuraApplication.CuraApplication.SettingVersion)
 
     # This is emitted whenever the containersChanged signal from the ContainerStack base class is emitted.
     pyqtContainersChanged = pyqtSignal()
@@ -107,7 +121,7 @@ class CuraContainerStack(ContainerStack):
     #
     #   \throws Exceptions.InvalidContainerError Raised when no container could be found with the specified ID.
     def setQualityById(self, new_quality_id: str) -> None:
-        quality = self._empty_instance_container
+        quality = self._empty_quality
         if new_quality_id == "default":
             new_quality = self.findDefaultQuality()
             if new_quality:
@@ -145,7 +159,7 @@ class CuraContainerStack(ContainerStack):
     #
     #   \throws Exceptions.InvalidContainerError Raised when no container could be found with the specified ID.
     def setMaterialById(self, new_material_id: str) -> None:
-        material = self._empty_instance_container
+        material = self._empty_material
         if new_material_id == "default":
             new_material = self.findDefaultMaterial()
             if new_material:
@@ -183,7 +197,7 @@ class CuraContainerStack(ContainerStack):
     #
     #   \throws Exceptions.InvalidContainerError Raised when no container could be found with the specified ID.
     def setVariantById(self, new_variant_id: str) -> None:
-        variant = self._empty_instance_container
+        variant = self._empty_variant
         if new_variant_id == "default":
             new_variant = self.findDefaultVariant()
             if new_variant:
@@ -250,7 +264,7 @@ class CuraContainerStack(ContainerStack):
     ##  Get the definition container.
     #
     #   \return The definition container. Should always be a valid container, but can be equal to the empty InstanceContainer.
-    @pyqtProperty(DefinitionContainer, fset = setDefinition, notify = pyqtContainersChanged)
+    @pyqtProperty(QObject, fset = setDefinition, notify = pyqtContainersChanged)
     def definition(self) -> DefinitionContainer:
         return self._containers[_ContainerIndexes.Definition]
 
@@ -345,8 +359,8 @@ class CuraContainerStack(ContainerStack):
     #
     #   \throws InvalidContainerStackError Raised when no definition can be found for the stack.
     @override(ContainerStack)
-    def deserialize(self, contents: str) -> None:
-        super().deserialize(contents)
+    def deserialize(self, contents: str, file_name: Optional[str] = None) -> None:
+        super().deserialize(contents, file_name)
 
         new_containers = self._containers.copy()
         while len(new_containers) < len(_ContainerIndexes.IndexTypeMap):
@@ -393,7 +407,9 @@ class CuraContainerStack(ContainerStack):
     #   \note This method assumes the stack has a valid machine definition.
     def findDefaultVariant(self) -> Optional[ContainerInterface]:
         definition = self._getMachineDefinition()
-        if not definition.getMetaDataEntry("has_variants"):
+        # has_variants can be overridden in other containers and stacks.
+        # In the case of UM2, it is overridden in the GlobalStack
+        if not self.getMetaDataEntry("has_variants"):
             # If the machine does not use variants, we should never set a variant.
             return None
 
@@ -429,6 +445,7 @@ class CuraContainerStack(ContainerStack):
     #   - If the machine definition has a metadata entry "has_machine_materials", the definition of the material should
     #     be the same as the machine definition for this stack. Otherwise, the definition should be "fdmprinter".
     #   - The container should have a metadata entry "type" with value "material".
+    #   - The material should have an approximate diameter that matches the machine
     #   - If the machine definition has a metadata entry "has_variants" and set to True, the "variant" metadata entry of
     #     the material should be the same as the ID of the variant in the stack. Only applies if "has_machine_materials" is also True.
     #   - If the stack currently has a material set, try to find a material that matches the current material by name.
@@ -450,12 +467,15 @@ class CuraContainerStack(ContainerStack):
         else:
             search_criteria["definition"] = "fdmprinter"
 
-        if self.material != self._empty_instance_container:
+        if self.material != self._empty_material:
             search_criteria["name"] = self.material.name
         else:
             preferred_material = definition.getMetaDataEntry("preferred_material")
             if preferred_material:
                 search_criteria["id"] = preferred_material
+
+        approximate_material_diameter = str(round(self.getProperty("material_diameter", "value")))
+        search_criteria["approximate_diameter"] = approximate_material_diameter
 
         materials = ContainerRegistry.getInstance().findInstanceContainers(**search_criteria)
         if not materials:
@@ -494,7 +514,7 @@ class CuraContainerStack(ContainerStack):
         else:
             search_criteria["definition"] = "fdmprinter"
 
-        if self.quality != self._empty_instance_container:
+        if self.quality != self._empty_quality:
             search_criteria["name"] = self.quality.name
         else:
             preferred_quality = definition.getMetaDataEntry("preferred_quality")
